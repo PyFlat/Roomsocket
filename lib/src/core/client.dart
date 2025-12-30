@@ -5,10 +5,12 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 class ConnectedClient {
   final String id;
   final WebSocketChannel channel;
+  final dynamic payload;
 
   ConnectedClient({
     required this.id,
     required this.channel,
+    this.payload,
   });
 
   void send(dynamic json) {

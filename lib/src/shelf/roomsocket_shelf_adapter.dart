@@ -13,11 +13,14 @@ class RoomSocketShelfAdapter {
   final FutureOr<Response?> Function(Request request)? authenticator;
   final Response Function()? notFoundResponse;
 
+  final dynamic Function(Request request)? extractRequestData;
+
   RoomSocketShelfAdapter(
     this.server, {
     this.path = 'ws',
     this.authenticator,
     this.notFoundResponse,
+    this.extractRequestData,
   });
 
   Handler get handler {
@@ -36,7 +39,8 @@ class RoomSocketShelfAdapter {
 
       final wsHandler = webSocketHandler(
         (WebSocketChannel channel, _) {
-          server.handleSocket(channel);
+          final payload = extractRequestData?.call(request);
+          server.handleSocket(channel, payload: payload);
         },
         pingInterval: Duration(seconds: 10),
       );

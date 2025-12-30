@@ -18,10 +18,11 @@ class RoomSocketServer {
   void Function(ConnectedClient client)? onDisconnect;
   MessageHandler? onMessage;
 
-  Future<void> handleSocket(WebSocketChannel channel) async {
+  Future<void> handleSocket(WebSocketChannel channel, {dynamic payload}) async {
     final client = ConnectedClient(
       id: _uuid.v4(),
       channel: channel,
+      payload: payload,
     );
 
     _clients[client.id] = client;
