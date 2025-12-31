@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:roomsocket/src/client/roomsocket_client.dart';
+import 'package:roomsocket/roomsocket.dart';
 
 void main() async {
   RoomSocketClient socket =
