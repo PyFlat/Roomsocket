@@ -4,7 +4,7 @@ import 'package:roomsocket/roomsocket.dart';
 
 void main() async {
   RoomSocketClient socket =
-      RoomSocketClient(Uri.parse('ws://localhost:8080/wsx'), headers: {
+      RoomSocketClient(Uri.parse('ws://localhost:8080/ws'), headers: {
     'authorization': 'Bearer secret',
   }, onConnect: () {
     print('Connected to the server.');
@@ -27,6 +27,6 @@ void main() async {
   socket.send(jsonEncode({'message': 'Hello, Server!'}));
 
   Future.delayed(Duration(seconds: 3), () {
-    socket.close();
+    socket.reconnect();
   });
 }
