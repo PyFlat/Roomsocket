@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 class RoomSocketClient {
-  final Uri uri;
+  Uri uri;
 
   final Future<Map<String, String>?> Function()? headerProvider;
 
@@ -28,12 +28,16 @@ class RoomSocketClient {
   WebSocket? get socket => _socket;
   bool get isConnected => _socket != null;
 
-  Future<bool> connect() async {
+  Future<bool> connect({Uri? uri}) async {
     try {
       _headers = await headerProvider?.call() ?? _headers;
 
+      if (uri != null) {
+        this.uri = uri;
+      }
+
       _socket = await WebSocket.connect(
-        uri.toString(),
+        this.uri.toString(),
         headers: _headers,
       );
 
@@ -72,10 +76,10 @@ class RoomSocketClient {
     }
   }
 
-  Future<void> reconnect() async {
+  Future<void> reconnect({Uri? uri}) async {
     _manuallyClosed = false;
     await _killSocket();
-    await connect();
+    await connect(uri: uri);
   }
 
   void _startReconnectLoop() {
