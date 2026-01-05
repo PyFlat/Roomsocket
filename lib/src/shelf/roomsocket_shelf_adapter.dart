@@ -42,7 +42,6 @@ class RoomSocketShelfAdapter {
           final payload = extractRequestData?.call(request);
           server.handleSocket(channel, payload: payload);
         },
-        pingInterval: Duration(seconds: 10),
       );
 
       return wsHandler(request);

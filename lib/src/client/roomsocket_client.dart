@@ -1,21 +1,26 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 class RoomSocketClient {
   Uri uri;
-
   final Future<Map<String, String>?> Function()? headerProvider;
-
   final Function? onConnect;
-
   final Duration reconnectInterval;
 
   WebSocket? _socket;
   Timer? _reconnectTimer;
   Map<String, String>? _headers;
+  bool _connected = false;
+  bool _manuallyClosed = false;
+
+  final List<dynamic> _sendQueue = [];
 
   int? errorCode;
-  bool _manuallyClosed = false;
+
+  final List<void Function(dynamic)> _manualDataListeners = [];
+  final List<void Function()> _manualDoneListeners = [];
+  final List<void Function(dynamic)> _manualErrorListeners = [];
 
   RoomSocketClient(
     this.uri, {
@@ -26,52 +31,33 @@ class RoomSocketClient {
   }) : _headers = headers;
 
   WebSocket? get socket => _socket;
-  bool get isConnected => _socket != null;
+  bool get isConnected => _connected;
 
   Future<bool> connect({Uri? uri}) async {
+    if (uri != null) this.uri = uri;
+    _headers = await headerProvider?.call() ?? _headers;
+
     try {
-      _headers = await headerProvider?.call() ?? _headers;
-
-      if (uri != null) {
-        this.uri = uri;
-      }
-
       _socket = await WebSocket.connect(
         this.uri.toString(),
         headers: _headers,
       );
 
-      bool closedImmediately = false;
-
-      _socket!.done.then((_) {
-        _socket = null;
-
-        if (!_manuallyClosed) {
-          _startReconnectLoop();
-        }
-
-        closedImmediately = true;
-      });
-
-      await Future.delayed(const Duration(milliseconds: 50));
-
-      if (closedImmediately) {
-        errorCode = 401;
-        return false;
-      }
-
-      _stopReconnectLoop();
-      _manuallyClosed = false;
-
+      _connected = true;
       onConnect?.call();
+      _attachListeners();
+      _flushQueue();
+      _stopReconnectLoop();
       return true;
     } on WebSocketException catch (e) {
       errorCode = e.httpStatusCode ?? 0;
-      _startReconnectLoop();
+      _connected = false;
+      if (!_manuallyClosed) _startReconnectLoop();
       return false;
     } catch (_) {
       errorCode = 0;
-      _startReconnectLoop();
+      _connected = false;
+      if (!_manuallyClosed) _startReconnectLoop();
       return false;
     }
   }
@@ -86,7 +72,7 @@ class RoomSocketClient {
     if (_reconnectTimer != null) return;
 
     _reconnectTimer = Timer.periodic(reconnectInterval, (_) async {
-      if (_socket == null) {
+      if (!_connected) {
         await connect();
       }
     });
@@ -98,10 +84,28 @@ class RoomSocketClient {
   }
 
   void send(dynamic message) {
-    if (_socket != null) {
-      _socket!.add(message);
+    if (_connected && _socket != null) {
+      try {
+        _socket!.add(message);
+      } catch (_) {
+        _sendQueue.add(message);
+        if (!_manuallyClosed) _startReconnectLoop();
+      }
     } else {
-      throw Exception('Cannot send message. Socket not connected.');
+      _sendQueue.add(message);
+      if (!_manuallyClosed) _startReconnectLoop();
+    }
+  }
+
+  void _flushQueue() {
+    while (_sendQueue.isNotEmpty && _connected && _socket != null) {
+      final msg = _sendQueue.removeAt(0);
+      try {
+        _socket!.add(msg);
+      } catch (_) {
+        _sendQueue.insert(0, msg);
+        break;
+      }
     }
   }
 
@@ -110,22 +114,54 @@ class RoomSocketClient {
     void Function()? onDone,
     void Function(dynamic error)? onError,
   }) {
-    if (_socket == null) {
-      throw Exception('Cannot listen. Socket not connected.');
-    }
+    _manualDataListeners.add(onData);
+    if (onDone != null) _manualDoneListeners.add(onDone);
+    if (onError != null) _manualErrorListeners.add(onError);
+  }
 
-    _socket!.listen(
-      onData,
+  void _attachListeners(
+      {void Function(dynamic data)? onData,
+      void Function()? onDone,
+      void Function(dynamic error)? onError}) {
+    _socket?.listen(
+      (data) {
+        try {
+          final msg = jsonDecode(data);
+          if (msg is Map && msg['type'] == 'ping') {
+            _socket!.add(jsonEncode({"type": "pong"}));
+            return;
+          }
+        } catch (_) {}
+
+        for (var listener in _manualDataListeners) {
+          listener(data);
+        }
+
+        onData?.call(data);
+      },
       onDone: () {
+        _connected = false;
         _socket = null;
+
+        for (var listener in _manualDoneListeners) {
+          listener();
+        }
+
         onDone?.call();
         if (!_manuallyClosed) _startReconnectLoop();
       },
       onError: (error) {
+        _connected = false;
         _socket = null;
+
+        for (var listener in _manualErrorListeners) {
+          listener(error);
+        }
+
         onError?.call(error);
         if (!_manuallyClosed) _startReconnectLoop();
       },
+      cancelOnError: true,
     );
   }
 
@@ -138,12 +174,10 @@ class RoomSocketClient {
   Future<void> _killSocket([int? code, String? reason]) async {
     if (_socket != null) {
       try {
-        await _socket!.close(
-          code ?? WebSocketStatus.normalClosure,
-          reason,
-        );
+        await _socket!.close(code ?? WebSocketStatus.normalClosure, reason);
       } catch (_) {}
       _socket = null;
+      _connected = false;
     }
   }
 }

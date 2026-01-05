@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:uuid/uuid.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -29,7 +31,18 @@ class RoomSocketServer {
     onConnect?.call(client);
 
     channel.stream.listen(
-      (data) => onMessage?.call(client, data),
+      (data) {
+        try {
+          final msg = jsonDecode(data);
+
+          if (msg is Map && msg['type'] == 'pong') {
+            client.resetTimer();
+            return;
+          }
+
+          onMessage?.call(client, data);
+        } catch (_) {}
+      },
       onDone: () => _remove(client),
       onError: (_) => _remove(client),
     );
@@ -46,8 +59,12 @@ class RoomSocketServer {
   }
 
   void broadcast(String room, dynamic json) {
-    for (final client in _rooms.clients(room)) {
-      client.send(json);
+    for (final client in _rooms.clients(room).toList()) {
+      try {
+        client.send(json);
+      } catch (_) {
+        _remove(client);
+      }
     }
   }
 
