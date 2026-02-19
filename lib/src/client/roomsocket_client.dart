@@ -7,6 +7,7 @@ class RoomSocketClient {
   final Future<Map<String, String>?> Function()? headerProvider;
   final Function? onConnect;
   final Duration reconnectInterval;
+  final Duration timeoutDuration = const Duration(seconds: 10);
 
   WebSocket? _socket;
   Timer? _reconnectTimer;
@@ -41,7 +42,7 @@ class RoomSocketClient {
       _socket = await WebSocket.connect(
         this.uri.toString(),
         headers: _headers,
-      );
+      ).timeout(timeoutDuration);
 
       _connected = true;
       onConnect?.call();
