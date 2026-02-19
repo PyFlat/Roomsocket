@@ -7,7 +7,7 @@ class RoomSocketClient {
   final Future<Map<String, String>?> Function()? headerProvider;
   final Function? onConnect;
   final Duration reconnectInterval;
-  final Duration timeoutDuration = const Duration(seconds: 10);
+  final Duration timeoutDuration;
 
   WebSocket? _socket;
   Timer? _reconnectTimer;
@@ -29,6 +29,7 @@ class RoomSocketClient {
     this.headerProvider,
     this.onConnect,
     this.reconnectInterval = const Duration(seconds: 5),
+    this.timeoutDuration = const Duration(seconds: 10),
   }) : _headers = headers;
 
   WebSocket? get socket => _socket;
