@@ -40,10 +40,17 @@ class RoomSocketClient {
     _headers = await headerProvider?.call() ?? _headers;
 
     try {
+      await _killSocket();
+
+      final httpClient = HttpClient();
+
+      httpClient.connectionTimeout = timeoutDuration;
+
       _socket = await WebSocket.connect(
         this.uri.toString(),
         headers: _headers,
-      ).timeout(timeoutDuration);
+        customClient: httpClient,
+      );
 
       _connected = true;
       onConnect?.call();
@@ -74,6 +81,9 @@ class RoomSocketClient {
     if (_reconnectTimer != null) return;
 
     _reconnectTimer = Timer.periodic(reconnectInterval, (_) async {
+      if (_socket != null) {
+        await _killSocket();
+      }
       if (!_connected) {
         await connect();
       }
