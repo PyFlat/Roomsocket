@@ -6,6 +6,7 @@ class RoomSocketClient {
   Uri uri;
   final Future<Map<String, String>?> Function()? headerProvider;
   final Function? onConnect;
+  final Function(dynamic)? onReconnectFailed;
   final Duration reconnectInterval;
   final Duration timeoutDuration;
 
@@ -28,6 +29,7 @@ class RoomSocketClient {
     Map<String, String>? headers,
     this.headerProvider,
     this.onConnect,
+    this.onReconnectFailed,
     this.reconnectInterval = const Duration(seconds: 5),
     this.timeoutDuration = const Duration(seconds: 10),
   }) : _headers = headers;
@@ -59,11 +61,13 @@ class RoomSocketClient {
       _stopReconnectLoop();
       return true;
     } on WebSocketException catch (e) {
+      onReconnectFailed?.call(e);
       errorCode = e.httpStatusCode ?? 0;
       _connected = false;
       if (!_manuallyClosed) _startReconnectLoop();
       return false;
-    } catch (_) {
+    } catch (e) {
+      onReconnectFailed?.call(e);
       errorCode = 0;
       _connected = false;
       if (!_manuallyClosed) _startReconnectLoop();
