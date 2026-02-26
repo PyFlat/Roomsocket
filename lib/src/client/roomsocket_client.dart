@@ -1,8 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
-import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
+
+const isWeb = bool.fromEnvironment('dart.library.js_interop');
 
 class RoomSocketClient {
   Uri uri;
@@ -49,7 +50,7 @@ class RoomSocketClient {
       await _killSocket();
       Uri finalUri = _prepareUri();
 
-      if (kIsWeb) {
+      if (isWeb) {
         _channel = WebSocketChannel.connect(finalUri);
       } else {
         _channel = IOWebSocketChannel.connect(
@@ -137,7 +138,7 @@ class RoomSocketClient {
   }
 
   Uri _prepareUri() {
-    if (kIsWeb && _headers?["Authorization"] != null) {
+    if (isWeb && _headers?["Authorization"] != null) {
       final token = _headers!["Authorization"]!.replaceFirst("Bearer ", "");
       return uri.replace(
         queryParameters: {...uri.queryParameters, "token": token},
