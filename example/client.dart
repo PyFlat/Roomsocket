@@ -12,7 +12,6 @@ void main() async {
 
   final connected = await socket.connect();
   if (!connected) {
-    print('Failed to connect. Error code: ${socket.errorCode}');
     return;
   }
 

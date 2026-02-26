@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
+import 'package:flutter/foundation.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:web_socket_channel/io.dart';
 
 class RoomSocketClient {
   Uri uri;
@@ -10,16 +12,15 @@ class RoomSocketClient {
   final Duration reconnectInterval;
   final Duration timeoutDuration;
 
-  WebSocket? _socket;
+  WebSocketChannel? _channel;
   Timer? _reconnectTimer;
   Map<String, String>? _headers;
+
   bool _connected = false;
   bool _manuallyClosed = false;
+  bool _isConnecting = false;
 
   final List<dynamic> _sendQueue = [];
-
-  int? errorCode;
-
   final List<void Function(dynamic)> _manualDataListeners = [];
   final List<void Function()> _manualDoneListeners = [];
   final List<void Function(dynamic)> _manualErrorListeners = [];
@@ -34,166 +35,171 @@ class RoomSocketClient {
     this.timeoutDuration = const Duration(seconds: 10),
   }) : _headers = headers;
 
-  WebSocket? get socket => _socket;
   bool get isConnected => _connected;
 
   Future<bool> connect({Uri? uri}) async {
+    if (_isConnecting || _connected) return false;
+    _isConnecting = true;
+    _manuallyClosed = false;
+
     if (uri != null) this.uri = uri;
     _headers = await headerProvider?.call() ?? _headers;
 
     try {
       await _killSocket();
+      Uri finalUri = _prepareUri();
 
-      final httpClient = HttpClient();
+      if (kIsWeb) {
+        _channel = WebSocketChannel.connect(finalUri);
+      } else {
+        _channel = IOWebSocketChannel.connect(
+          finalUri,
+          headers: _headers,
+          connectTimeout: timeoutDuration,
+        );
+      }
 
-      httpClient.connectionTimeout = timeoutDuration;
-
-      _socket = await WebSocket.connect(
-        this.uri.toString(),
-        headers: _headers,
-        customClient: httpClient,
-      );
+      await _channel!.ready.timeout(timeoutDuration);
 
       _connected = true;
-      onConnect?.call();
+      _isConnecting = false;
+
       _attachListeners();
       _flushQueue();
-      _stopReconnectLoop();
+      onConnect?.call();
       return true;
-    } on WebSocketException catch (e) {
-      onReconnectFailed?.call(e);
-      errorCode = e.httpStatusCode ?? 0;
-      _connected = false;
-      if (!_manuallyClosed) _startReconnectLoop();
-      return false;
     } catch (e) {
-      onReconnectFailed?.call(e);
-      errorCode = 0;
       _connected = false;
-      if (!_manuallyClosed) _startReconnectLoop();
+      _isConnecting = false;
+
+      onReconnectFailed?.call(e);
+
+      _ensureReconnectLoop();
       return false;
+    } finally {
+      _isConnecting = false;
     }
   }
 
-  Future<void> reconnect({Uri? uri}) async {
+  Future<bool> reconnect({Uri? uri}) async {
     _manuallyClosed = false;
+
     await _killSocket();
-    await connect(uri: uri);
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+
+    return await connect(uri: uri);
   }
 
-  void _startReconnectLoop() {
-    if (_reconnectTimer != null) return;
+  void _ensureReconnectLoop() {
+    if (_manuallyClosed || _connected || _reconnectTimer != null) return;
 
-    _reconnectTimer = Timer.periodic(reconnectInterval, (_) async {
-      if (_socket != null) {
-        await _killSocket();
+    _reconnectTimer = Timer.periodic(reconnectInterval, (timer) async {
+      if (_connected || _manuallyClosed) {
+        timer.cancel();
+        _reconnectTimer = null;
+        return;
       }
-      if (!_connected) {
+
+      if (!_isConnecting) {
         await connect();
       }
     });
   }
 
-  void _stopReconnectLoop() {
-    _reconnectTimer?.cancel();
-    _reconnectTimer = null;
-  }
-
-  void send(dynamic message) {
-    if (_connected && _socket != null) {
-      try {
-        _socket!.add(message);
-      } catch (_) {
-        _sendQueue.add(message);
-        if (!_manuallyClosed) _startReconnectLoop();
-      }
-    } else {
-      _sendQueue.add(message);
-      if (!_manuallyClosed) _startReconnectLoop();
-    }
-  }
-
-  void _flushQueue() {
-    while (_sendQueue.isNotEmpty && _connected && _socket != null) {
-      final msg = _sendQueue.removeAt(0);
-      try {
-        _socket!.add(msg);
-      } catch (_) {
-        _sendQueue.insert(0, msg);
-        break;
-      }
-    }
-  }
-
-  void listen(
-    void Function(dynamic data) onData, {
-    void Function()? onDone,
-    void Function(dynamic error)? onError,
-  }) {
-    _manualDataListeners.add(onData);
-    if (onDone != null) _manualDoneListeners.add(onDone);
-    if (onError != null) _manualErrorListeners.add(onError);
-  }
-
-  void _attachListeners(
-      {void Function(dynamic data)? onData,
-      void Function()? onDone,
-      void Function(dynamic error)? onError}) {
-    _socket?.listen(
+  void _attachListeners() {
+    _channel?.stream.listen(
       (data) {
-        try {
-          final msg = jsonDecode(data);
-          if (msg is Map && msg['type'] == 'ping') {
-            _socket!.add(jsonEncode({"type": "pong"}));
-            return;
+        final wasHandledInternally = _handleIncomingData(data);
+        if (!wasHandledInternally) {
+          for (var listener in _manualDataListeners) {
+            listener(data);
           }
-        } catch (_) {}
-
-        for (var listener in _manualDataListeners) {
-          listener(data);
         }
-
-        onData?.call(data);
       },
-      onDone: () {
-        _connected = false;
-        _socket = null;
-
-        for (var listener in _manualDoneListeners) {
-          listener();
-        }
-
-        onDone?.call();
-        if (!_manuallyClosed) _startReconnectLoop();
-      },
-      onError: (error) {
-        _connected = false;
-        _socket = null;
-
-        for (var listener in _manualErrorListeners) {
-          listener(error);
-        }
-
-        onError?.call(error);
-        if (!_manuallyClosed) _startReconnectLoop();
-      },
+      onDone: () => _handleDisconnection("Done"),
+      onError: (error) => _handleDisconnection("Error: $error"),
       cancelOnError: true,
     );
   }
 
-  Future<void> close([int? code, String? reason]) async {
-    _manuallyClosed = true;
-    _stopReconnectLoop();
-    await _killSocket(code, reason);
+  void _handleDisconnection(String reason) {
+    _connected = false;
+    _channel = null;
+
+    for (var listener in _manualDoneListeners) {
+      listener();
+    }
+
+    if (!_manuallyClosed) {
+      _ensureReconnectLoop();
+    }
   }
 
-  Future<void> _killSocket([int? code, String? reason]) async {
-    if (_socket != null) {
-      try {
-        await _socket!.close(code ?? WebSocketStatus.normalClosure, reason);
-      } catch (_) {}
-      _socket = null;
-      _connected = false;
+  Uri _prepareUri() {
+    if (kIsWeb && _headers?["Authorization"] != null) {
+      final token = _headers!["Authorization"]!.replaceFirst("Bearer ", "");
+      return uri.replace(
+        queryParameters: {...uri.queryParameters, "token": token},
+      );
     }
+    return uri;
+  }
+
+  Future<void> _killSocket() async {
+    if (_channel == null) return;
+
+    final closingChannel = _channel;
+    _channel = null;
+    _connected = false;
+
+    try {
+      await closingChannel!.sink.close().timeout(
+            const Duration(seconds: 1),
+            onTimeout: () {},
+          );
+    } catch (e) {
+      print("Error while killing socket: $e");
+    }
+  }
+
+  void send(dynamic message) {
+    if (_connected && _channel != null) {
+      _channel!.sink.add(message);
+    } else {
+      _sendQueue.add(message);
+      _ensureReconnectLoop();
+    }
+  }
+
+  void _flushQueue() {
+    while (_sendQueue.isNotEmpty && _connected && _channel != null) {
+      _channel!.sink.add(_sendQueue.removeAt(0));
+    }
+  }
+
+  bool _handleIncomingData(dynamic data) {
+    try {
+      final msg = jsonDecode(data);
+      if (msg is Map && msg['type'] == 'ping') {
+        _channel?.sink.add(jsonEncode({"type": "pong"}));
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  Future<void> close() async {
+    _manuallyClosed = true;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    await _killSocket();
+  }
+
+  void listen(void Function(dynamic data) onData,
+      {void Function()? onDone, void Function(dynamic error)? onError}) {
+    _manualDataListeners.add(onData);
+    if (onDone != null) _manualDoneListeners.add(onDone);
+    if (onError != null) _manualErrorListeners.add(onError);
   }
 }
