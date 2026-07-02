@@ -19,7 +19,10 @@ class RoomSocketClient {
 
   bool _connected = false;
   bool _manuallyClosed = false;
+  bool _paused = false;
   bool _isConnecting = false;
+
+  int _generation = 0;
 
   final List<dynamic> _sendQueue = [];
   final List<void Function(dynamic)> _manualDataListeners = [];
@@ -37,45 +40,53 @@ class RoomSocketClient {
   }) : _headers = headers;
 
   bool get isConnected => _connected;
+  bool get isPaused => _paused;
 
   Future<bool> connect({Uri? uri}) async {
-    if (_isConnecting || _connected) return false;
+    if (_connected) return false;
     _isConnecting = true;
     _manuallyClosed = false;
+    _paused = false;
 
     if (uri != null) this.uri = uri;
     _headers = await headerProvider?.call() ?? _headers;
 
+    final generation = ++_generation;
+    WebSocketChannel? channel;
+
     try {
       await _killSocket();
-      Uri finalUri = _prepareUri();
+      final finalUri = _prepareUri();
 
-      if (isWeb) {
-        _channel = WebSocketChannel.connect(finalUri);
-      } else {
-        _channel = IOWebSocketChannel.connect(
-          finalUri,
-          headers: _headers,
-          connectTimeout: timeoutDuration,
-        );
+      channel = isWeb
+          ? WebSocketChannel.connect(finalUri)
+          : IOWebSocketChannel.connect(
+              finalUri,
+              headers: _headers,
+              connectTimeout: timeoutDuration,
+            );
+
+      await channel.ready.timeout(timeoutDuration);
+
+      if (generation != _generation) {
+        await _closeChannel(channel);
+        return false;
       }
 
-      await _channel!.ready.timeout(timeoutDuration);
-
+      _channel = channel;
       _connected = true;
-      _isConnecting = false;
-
-      _attachListeners();
+      _attachListeners(channel, generation);
       _flushQueue();
       onConnect?.call();
       return true;
     } catch (e) {
-      _connected = false;
-      _isConnecting = false;
+      if (channel != null) await _closeChannel(channel);
 
-      onReconnectFailed?.call(e);
-
-      _ensureReconnectLoop();
+      if (generation == _generation) {
+        _connected = false;
+        onReconnectFailed?.call(e);
+        _ensureReconnectLoop();
+      }
       return false;
     } finally {
       _isConnecting = false;
@@ -84,78 +95,119 @@ class RoomSocketClient {
 
   Future<bool> reconnect({Uri? uri}) async {
     _manuallyClosed = false;
-
-    await _killSocket();
+    _paused = false;
+    _generation++;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
-
+    await _killSocket();
+    _isConnecting = false;
     return await connect(uri: uri);
   }
 
-  void _ensureReconnectLoop() {
-    if (_manuallyClosed || _connected || _reconnectTimer != null) return;
+  Future<void> pause() async {
+    if (_paused) return;
+    _paused = true;
+    _generation++;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    await _killSocket();
+  }
 
-    _reconnectTimer = Timer.periodic(reconnectInterval, (timer) async {
-      if (_connected || _manuallyClosed) {
+  Future<bool> resume() async {
+    if (!_paused) return _connected;
+    _paused = false;
+    _generation++;
+    _isConnecting = false;
+    return await connect();
+  }
+
+  void _ensureReconnectLoop() {
+    if (_manuallyClosed || _paused || _connected || _reconnectTimer != null) {
+      return;
+    }
+
+    _reconnectTimer = Timer.periodic(reconnectInterval, (timer) {
+      if (_connected || _manuallyClosed || _paused) {
         timer.cancel();
         _reconnectTimer = null;
         return;
       }
 
       if (!_isConnecting) {
-        await connect();
+        connect();
       }
     });
   }
 
-  void _attachListeners() {
-    _channel?.stream.listen(
+  void _attachListeners(WebSocketChannel channel, int generation) {
+    channel.stream.listen(
       (data) {
+        if (generation != _generation) return;
         final wasHandledInternally = _handleIncomingData(data);
         if (!wasHandledInternally) {
-          for (var listener in _manualDataListeners) {
+          for (var listener in List.of(_manualDataListeners)) {
             listener(data);
           }
         }
       },
-      onDone: () => _handleDisconnection("Done"),
-      onError: (error) => _handleDisconnection("Error: $error"),
+      onDone: () => _handleDisconnection(generation),
+      onError: (error) => _handleDisconnection(generation, error: error),
       cancelOnError: true,
     );
   }
 
-  void _handleDisconnection(String reason) {
+  void _handleDisconnection(int generation, {Object? error}) {
+    if (generation != _generation) return;
+
     _connected = false;
     _channel = null;
 
-    for (var listener in _manualDoneListeners) {
+    if (error != null) {
+      for (var listener in List.of(_manualErrorListeners)) {
+        listener(error);
+      }
+    }
+    for (var listener in List.of(_manualDoneListeners)) {
       listener();
     }
 
-    if (!_manuallyClosed) {
+    if (!_manuallyClosed && !_paused) {
       _ensureReconnectLoop();
     }
   }
 
-  Uri _prepareUri() {
-    if (isWeb && _headers?["Authorization"] != null) {
-      final token = _headers!["Authorization"]!.replaceFirst("Bearer ", "");
-      return uri.replace(
-        queryParameters: {...uri.queryParameters, "token": token},
-      );
+  String? _findHeader(String name) {
+    if (_headers == null) return null;
+    for (final entry in _headers!.entries) {
+      if (entry.key.toLowerCase() == name) return entry.value;
     }
-    return uri;
+    return null;
+  }
+
+  Uri _prepareUri() {
+    if (!isWeb) return uri;
+
+    final authHeader = _findHeader('authorization');
+    if (authHeader == null) return uri;
+
+    final token =
+        authHeader.replaceFirst(RegExp('^Bearer ', caseSensitive: false), '');
+    return uri.replace(
+      queryParameters: {...uri.queryParameters, "token": token},
+    );
   }
 
   Future<void> _killSocket() async {
-    if (_channel == null) return;
-
-    final closingChannel = _channel;
+    final channel = _channel;
     _channel = null;
     _connected = false;
+    if (channel == null) return;
+    await _closeChannel(channel);
+  }
 
+  Future<void> _closeChannel(WebSocketChannel channel) async {
     try {
-      await closingChannel!.sink.close().timeout(
+      await channel.sink.close().timeout(
             const Duration(seconds: 1),
             onTimeout: () {},
           );
@@ -166,16 +218,27 @@ class RoomSocketClient {
 
   void send(dynamic message) {
     if (_connected && _channel != null) {
-      _channel!.sink.add(message);
-    } else {
-      _sendQueue.add(message);
-      _ensureReconnectLoop();
+      try {
+        _channel!.sink.add(message);
+        return;
+      } catch (_) {
+        // Sink is already broken (e.g. dead-but-not-yet-detected socket);
+        // fall through to queue it like any other disconnected send.
+      }
     }
+    _sendQueue.add(message);
+    if (!_paused) _ensureReconnectLoop();
   }
 
   void _flushQueue() {
     while (_sendQueue.isNotEmpty && _connected && _channel != null) {
-      _channel!.sink.add(_sendQueue.removeAt(0));
+      final message = _sendQueue.removeAt(0);
+      try {
+        _channel!.sink.add(message);
+      } catch (_) {
+        _sendQueue.insert(0, message);
+        break;
+      }
     }
   }
 
@@ -192,6 +255,8 @@ class RoomSocketClient {
 
   Future<void> close() async {
     _manuallyClosed = true;
+    _paused = false;
+    _generation++;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     await _killSocket();

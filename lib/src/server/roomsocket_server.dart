@@ -69,7 +69,11 @@ class RoomSocketServer {
   }
 
   void send(ConnectedClient client, dynamic json) {
-    client.send(json);
+    try {
+      client.send(json);
+    } catch (_) {
+      _remove(client);
+    }
   }
 
   void _remove(ConnectedClient client) {

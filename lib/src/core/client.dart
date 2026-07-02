@@ -11,6 +11,7 @@ class ConnectedClient {
   final Duration disconnectDuration;
   Timer? _pingTimer;
   Timer? _disconnectTimer;
+  bool _closed = false;
 
   ConnectedClient({
     required this.id,
@@ -23,30 +24,40 @@ class ConnectedClient {
   }
 
   void send(dynamic json) {
-    channel.sink.add(jsonEncode(json));
+    if (_closed) return;
+    try {
+      channel.sink.add(jsonEncode(json));
+    } catch (_) {
+      close();
+    }
   }
 
   Stream<dynamic> get stream =>
       channel.stream.map((event) => jsonDecode(event));
 
   void close() {
+    if (_closed) return;
+    _closed = true;
     _pingTimer?.cancel();
+    _pingTimer = null;
     _disconnectTimer?.cancel();
-    channel.sink.close();
+    _disconnectTimer = null;
+    try {
+      channel.sink.close();
+    } catch (_) {}
   }
 
   void _startHeartbeat() {
     send({"type": "ping"});
     _pingTimer = Timer.periodic(heartbeatInterval, (_) {
+      _disconnectTimer?.cancel();
       send({"type": "ping"});
-
-      _disconnectTimer = Timer(disconnectDuration, () {
-        close();
-      });
+      _disconnectTimer = Timer(disconnectDuration, close);
     });
   }
 
   void resetTimer() {
     _disconnectTimer?.cancel();
+    _disconnectTimer = null;
   }
 }
